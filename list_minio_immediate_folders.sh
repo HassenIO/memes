@@ -3,21 +3,25 @@
 # list_minio_immediate_folders.sh
 #
 # Lists folders under a given MinIO path (using mc) and shows only their
-# immediate child folders (one level deep). Does not recurse further.
+# immediate child folders (one level deep). Does not recurse the tree further.
+#
+# For each child folder (e.g. "main/" or model-specific subfolder):
+#   - created_at = oldest file timestamp found *inside* it (accurate creation time)
+#   - size       = total recursive size via mc du
 #
 # Assumes:
 #   - `mc` is installed and in PATH
 #   - The bucket/alias is already configured (here: bucket)
-#   - Starting path: bucket/parent_folder/
+#   - Starting path: bucket/folder/
 #
 # Usage:
 #   ./list_minio_immediate_folders.sh
-#   ./list_minio_immediate_folders.sh bucket/parent_folder
+#   ./list_minio_immediate_folders.sh bucket/some/other/prefix
 #   ./list_minio_immediate_folders.sh --csv
-#   ./list_minio_immediate_folders.sh --csv bucket/parent_folder > output.csv
+#   ./list_minio_immediate_folders.sh --csv bucket/some/other/prefix > output.csv
 #
 # If no argument is given, it defaults to:
-#   bucket/parent_folder/
+#   bucket/folder/
 #
 # In --csv mode the output is pure CSV (no colors/messages) so you can redirect to a file.
 #
@@ -47,7 +51,7 @@ done
 if [ -n "$path_arg" ]; then
     FULL_PATH="$path_arg"
 else
-    FULL_PATH="bucket/parent_folder"
+    FULL_PATH="bucket/folder"
 fi
 
 if [ "$csv_mode" = false ]; then
@@ -91,22 +95,35 @@ while IFS= read -r folder; do
         echo "📁 ${folder}/"
     fi
 
-    # Get immediate child folders + their listed timestamp from mc ls
-    # Format per line: DATE TIME SIZE NAME/
-    children_raw=$(mc ls "${child_path}/" 2>/dev/null | awk '
-        $NF ~ /\/$/ {
-            print $1, $2, $3, $NF
-        }' | sort -k4)
+    # Get immediate child folders (robust parsing for [timestamp ...] format)
+    children_raw=$(mc ls "${child_path}/" 2>/dev/null | grep '/$' | while read -r line; do
+        # Extract timestamp inside first [...]
+        ts=$(echo "$line" | sed -E 's/^\[([^]]+)\].*/\1/')
+        # Extract folder name (last field ending with /)
+        name=$(echo "$line" | awk '{print $NF}')
+        echo "$ts $name"
+    done | sort -k3)
 
     if [ -z "$children_raw" ]; then
         if [ "$csv_mode" = false ]; then
             echo "   └── (no child folders)"
         fi
     else
-        echo "$children_raw" | while read -r date time size name; do
+        echo "$children_raw" | while read -r ts name; do
             [ -z "$name" ] && continue
-            name_clean=${name%/}                    # remove trailing slash
+            name_clean=${name%/}
             full_child="${child_path}/${name_clean}"
+
+            # === Accurate creation time: oldest file timestamp INSIDE this child folder ===
+            # (scans recursively to find real upload/creation date of the model contents)
+            oldest_ts=$(mc ls -r "${full_child}/" 2>/dev/null \
+                | grep -o '\[[^]]*\]' | sed 's/^\[//;s/\]$//' | sort | head -1)
+
+            if [ -n "$oldest_ts" ]; then
+                created_at="$oldest_ts"
+            else
+                created_at="$ts"   # fallback to prefix timestamp if no files found
+            fi
 
             # Get human readable total size (always)
             total_size=$(mc du "${full_child}/" 2>/dev/null | head -1 | awk '{print $1, $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -114,9 +131,8 @@ while IFS= read -r folder; do
             if [ "$csv_mode" = true ]; then
                 # CSV row: model,created_at,size (bytes),human_size
                 model_path="${folder}/${name_clean}"
-                created_at="${date} ${time}"
 
-                # Try to get raw bytes via mc du --json (modern mc versions)
+                # Try to get raw bytes via mc du --json
                 bytes=$(mc du --json "${full_child}/" 2>/dev/null \
                     | grep -o '"size":[0-9]*' | head -1 | cut -d: -f2)
                 bytes=${bytes:-0}
@@ -125,8 +141,8 @@ while IFS= read -r folder; do
             else
                 # Pretty terminal output
                 echo "   └── ${name_clean}/"
-                printf "       📅 Created/Modified: %s %s    📦 Total size: %s\n" \
-                       "$date" "$time" "${total_size:-unknown}"
+                printf "       📅 Created/Modified: %s    📦 Total size: %s\n" \
+                       "$created_at" "${total_size:-unknown}"
             fi
         done
     fi
@@ -138,8 +154,8 @@ done <<< "$top_folders"
 
 if [ "$csv_mode" = false ]; then
     echo "✨ Done."
-    echo "   • Timestamp shown is from 'mc ls' (usually last activity on the prefix)."
+    echo "   • created_at = oldest file timestamp found *inside* the child folder (real creation/upload time)."
     echo "   • Total size comes from 'mc du' (recursive sum of all objects under the folder)."
-    echo "   • Only immediate children are shown — no deeper recursion."
-    echo "   • Use --csv flag for machine-readable CSV output (e.g. ./script.sh --csv > output.csv)"
+    echo "   • Only immediate children shown (e.g. 'main/' or other). Use --csv for spreadsheet-friendly output."
+    echo "   • CSV columns: model (folder/child), created_at (oldest), size (bytes), human_size"
 fi
