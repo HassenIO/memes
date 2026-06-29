@@ -120,7 +120,43 @@ while IFS= read -r folder; do
             first_child=${child_name%/}
             first_child_path="${top_path}/${first_child}"
 
-            # Check for second-level children (branches) under the first child
+            # Special rule: if the first child is "main", treat top as model, provider=HuggingFace, branch=main
+            if [ "${first_child,,}" = "main" ]; then
+                branch="main"
+                model="${folder}"
+                provider="HuggingFace"
+                logical_name="${model}:${branch}"
+                target_path="${first_child_path}"
+                ts_for_created="$child_ts"
+
+                # Compute and output (common block will be added after)
+                # For now, we'll duplicate the computation for this special case to keep it simple and working
+                if [ "$fast_mode" = true ]; then
+                    created_at="$ts_for_created"
+                else
+                    oldest_ts=$(mc ls -r "${target_path}/" 2>/dev/null \
+                        | grep -o '\[[^]]*\]' | sed 's/^\[//;s/\]$//' | sort | head -1)
+                    created_at=${oldest_ts:-$ts_for_created}
+                fi
+
+                du_output=$(mc du "${target_path}/" 2>/dev/null | head -1)
+                total_size=$(echo "$du_output" | awk '{print $1, $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                object_count=$(echo "$du_output" | awk '{print $NF}' | sed 's/[^0-9]//g')
+
+                if [ "$csv_mode" = true ]; then
+                    bytes=$(mc du --json "${target_path}/" 2>/dev/null \
+                        | grep -o '"size":[0-9]*' | head -1 | cut -d: -f2)
+                    bytes=${bytes:-0}
+                    echo "${logical_name},${provider},${model},${branch},${created_at},${bytes},${total_size:-unknown},${object_count:-0}"
+                else
+                    echo "   └── ${logical_name}/"
+                    printf "       📅 Created/Modified: %s    📦 Total size: %s (%s objects)\n" \
+                           "$created_at" "${total_size:-unknown}" "${object_count:-?}"
+                fi
+                continue
+            fi
+
+            # Check for second-level children (branches) under the first child (for non-main cases)
             grandchildren_raw=$(mc ls "${first_child_path}/" 2>/dev/null | grep '/$' | while read -r gline; do
                 gts=$(echo "$gline" | sed -E 's/^\[([^]]+)\].*/\1/')
                 gname=$(echo "$gline" | awk '{print $NF}')
@@ -223,4 +259,3 @@ if [ "$csv_mode" = false ]; then
     echo "   • created_at = oldest file timestamp inside the branch/model folder."
     echo "   • Use --csv for the full structured CSV. Add --fast to skip recursive timestamp scans."
 fi
-
