@@ -223,3 +223,4 @@ if [ "$csv_mode" = false ]; then
     echo "   • created_at = oldest file timestamp inside the branch/model folder."
     echo "   • Use --csv for the full structured CSV. Add --fast to skip recursive timestamp scans."
 fi
+
