@@ -75,7 +75,7 @@ top_folders=$(mc ls "${FULL_PATH}/" 2>/dev/null \
     | sort)
 
 if [ "$csv_mode" = true ]; then
-    echo "model,created_at,size,human_size"
+    echo "model,created_at,size,human_size,count_objects"
 fi
 
 if [ -z "$top_folders" ]; then
@@ -136,11 +136,13 @@ while IFS= read -r folder; do
                 fi
             fi
 
-            # Get human readable total size (always)
-            total_size=$(mc du "${full_child}/" 2>/dev/null | head -1 | awk '{print $1, $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            # Get human readable total size + object count from mc du
+            du_output=$(mc du "${full_child}/" 2>/dev/null | head -1)
+            total_size=$(echo "$du_output" | awk '{print $1, $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            object_count=$(echo "$du_output" | awk '{print $NF}' | sed 's/[^0-9]//g')
 
             if [ "$csv_mode" = true ]; then
-                # CSV row: model,created_at,size (bytes),human_size
+                # CSV row: model,created_at,size (bytes),human_size,count_objects
                 model_path="${folder}/${name_clean}"
 
                 # Try to get raw bytes via mc du --json
@@ -148,12 +150,12 @@ while IFS= read -r folder; do
                     | grep -o '"size":[0-9]*' | head -1 | cut -d: -f2)
                 bytes=${bytes:-0}
 
-                echo "${model_path},${created_at},${bytes},${total_size:-unknown}"
+                echo "${model_path},${created_at},${bytes},${total_size:-unknown},${object_count:-0}"
             else
                 # Pretty terminal output
                 echo "   └── ${name_clean}/"
-                printf "       📅 Created/Modified: %s    📦 Total size: %s\n" \
-                       "$created_at" "${total_size:-unknown}"
+                printf "       📅 Created/Modified: %s    📦 Total size: %s (%s objects)\n" \
+                       "$created_at" "${total_size:-unknown}" "${object_count:-?}"
             fi
         done
     fi
@@ -172,5 +174,6 @@ if [ "$csv_mode" = false ]; then
     fi
     echo "   • Total size comes from 'mc du' (recursive sum of all objects under the folder)."
     echo "   • Only immediate children shown (e.g. 'main/' or other). Use --csv for spreadsheet-friendly output."
+    echo "   • CSV columns: model, created_at, size (bytes), human_size, count_objects"
     echo "   • Add --fast for much quicker runs on large model folders."
 fi
