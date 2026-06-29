@@ -5,10 +5,12 @@
 # Lists folders under a given MinIO path (using mc) and shows only their
 # immediate child folders (one level deep). Does not recurse the tree further.
 #
-# For each child folder (e.g. "main/" or model-specific subfolder):
-#   - created_at = oldest file timestamp found *inside* it (accurate creation time)
-#                  (use --fast to skip recursive scan and use prefix timestamp instead)
-#   - size       = total recursive size via mc du
+# Structured output with parsed fields:
+#   name = provider/model:branch (or model:branch if no provider)
+#   provider = top-level folder or "HuggingFace"
+#   model = first-level child (or top if no provider)
+#   branch = second-level child (often "main" or version like "v0.2")
+#   created_at, size, human_size, count_objects from the branch/model level
 #
 # Assumes:
 #   - `mc` is installed and in PATH
@@ -20,7 +22,7 @@
 #   ./list_minio_immediate_folders.sh bucket/some/other/prefix
 #   ./list_minio_immediate_folders.sh --fast
 #   ./list_minio_immediate_folders.sh --csv
-#   ./list_minio_immediate_folders.sh --fast --csv bucket/some/other/prefix > output.csv
+#   ./list_minio_immediate_folders.sh --fast --csv bucket/some/other/prefix > models.csv
 #
 # If no argument is given, it defaults to:
 #   bucket/folder/
@@ -75,7 +77,7 @@ top_folders=$(mc ls "${FULL_PATH}/" 2>/dev/null \
     | sort)
 
 if [ "$csv_mode" = true ]; then
-    echo "model,created_at,size,human_size,count_objects"
+    echo "name,provider,model,branch,created_at,size,human_size,count_objects"
 fi
 
 if [ -z "$top_folders" ]; then
@@ -91,21 +93,19 @@ if [ "$csv_mode" = false ]; then
     echo ""
 fi
 
-# Process each top-level folder and list its immediate children only
+# Process each top-level folder (provider or model) and its children (model/branch)
 while IFS= read -r folder; do
     [ -z "$folder" ] && continue
 
-    child_path="${FULL_PATH}/${folder}"
+    top_path="${FULL_PATH}/${folder}"
 
     if [ "$csv_mode" = false ]; then
         echo "📁 ${folder}/"
     fi
 
-    # Get immediate child folders (robust parsing for [timestamp ...] format)
-    children_raw=$(mc ls "${child_path}/" 2>/dev/null | grep '/$' | while read -r line; do
-        # Extract timestamp inside first [...]
+    # Get immediate first-level children under this top folder
+    children_raw=$(mc ls "${top_path}/" 2>/dev/null | grep '/$' | while read -r line; do
         ts=$(echo "$line" | sed -E 's/^\[([^]]+)\].*/\1/')
-        # Extract folder name (last field ending with /)
         name=$(echo "$line" | awk '{print $NF}')
         echo "${ts}|${name}"
     done | sort -k2 -t'|')
@@ -115,47 +115,93 @@ while IFS= read -r folder; do
             echo "   └── (no child folders)"
         fi
     else
-        echo "$children_raw" | while IFS='|' read -r ts name; do
-            [ -z "$name" ] && continue
-            name_clean=${name%/}
-            full_child="${child_path}/${name_clean}"
+        echo "$children_raw" | while IFS='|' read -r child_ts child_name; do
+            [ -z "$child_name" ] && continue
+            first_child=${child_name%/}
+            first_child_path="${top_path}/${first_child}"
 
-            # === Accurate creation time ===
-            if [ "$fast_mode" = true ]; then
-                # Fast mode: use prefix timestamp (quick)
-                created_at="$ts"
+            # Check for second-level children (branches) under the first child
+            grandchildren_raw=$(mc ls "${first_child_path}/" 2>/dev/null | grep '/$' | while read -r gline; do
+                gts=$(echo "$gline" | sed -E 's/^\[([^]]+)\].*/\1/')
+                gname=$(echo "$gline" | awk '{print $NF}')
+                echo "${gts}|${gname}"
+            done | sort -k2 -t'|')
+
+            if [ -n "$grandchildren_raw" ]; then
+                # Has grandchildren → top = provider, first_child = model, grandchild = branch
+                echo "$grandchildren_raw" | while IFS='|' read -r branch_ts branch_name; do
+                    [ -z "$branch_name" ] && continue
+                    branch=${branch_name%/}
+                    model="${first_child}"
+                    provider="${folder}"
+                    logical_name="${provider}/${model}:${branch}"
+                    target_path="${first_child_path}/${branch}"
+                    ts_for_created="$branch_ts"
+
+                    # === Compute created_at, size, count on target_path ===
+                    if [ "$fast_mode" = true ]; then
+                        created_at="$ts_for_created"
+                    else
+                        oldest_ts=$(mc ls -r "${target_path}/" 2>/dev/null \
+                            | grep -o '\[[^]]*\]' | sed 's/^\[//;s/\]$//' | sort | head -1)
+                        if [ -n "$oldest_ts" ]; then
+                            created_at="$oldest_ts"
+                        else
+                            created_at="$ts_for_created"
+                        fi
+                    fi
+
+                    du_output=$(mc du "${target_path}/" 2>/dev/null | head -1)
+                    total_size=$(echo "$du_output" | awk '{print $1, $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                    object_count=$(echo "$du_output" | awk '{print $NF}' | sed 's/[^0-9]//g')
+
+                    if [ "$csv_mode" = true ]; then
+                        bytes=$(mc du --json "${target_path}/" 2>/dev/null \
+                            | grep -o '"size":[0-9]*' | head -1 | cut -d: -f2)
+                        bytes=${bytes:-0}
+                        echo "${logical_name},${provider},${model},${branch},${created_at},${bytes},${total_size:-unknown},${object_count:-0}"
+                    else
+                        echo "   └── ${logical_name}/"
+                        printf "       📅 Created/Modified: %s    📦 Total size: %s (%s objects)\n" \
+                               "$created_at" "${total_size:-unknown}" "${object_count:-?}"
+                    fi
+                done
             else
-                # Full mode: scan recursively inside the child for the oldest file timestamp
-                oldest_ts=$(mc ls -r "${full_child}/" 2>/dev/null \
-                    | grep -o '\[[^]]*\]' | sed 's/^\[//;s/\]$//' | sort | head -1)
+                # No grandchildren → top = model, first_child = branch, provider = HuggingFace
+                branch="${first_child}"
+                model="${folder}"
+                provider="HuggingFace"
+                logical_name="${model}:${branch}"
+                target_path="${first_child_path}"
+                ts_for_created="$child_ts"
 
-                if [ -n "$oldest_ts" ]; then
-                    created_at="$oldest_ts"
+                # === Compute created_at, size, count on target_path ===
+                if [ "$fast_mode" = true ]; then
+                    created_at="$ts_for_created"
                 else
-                    created_at="$ts"   # fallback
+                    oldest_ts=$(mc ls -r "${target_path}/" 2>/dev/null \
+                        | grep -o '\[[^]]*\]' | sed 's/^\[//;s/\]$//' | sort | head -1)
+                    if [ -n "$oldest_ts" ]; then
+                        created_at="$oldest_ts"
+                    else
+                        created_at="$ts_for_created"
+                    fi
                 fi
-            fi
 
-            # Get human readable total size + object count from mc du
-            du_output=$(mc du "${full_child}/" 2>/dev/null | head -1)
-            total_size=$(echo "$du_output" | awk '{print $1, $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            object_count=$(echo "$du_output" | awk '{print $NF}' | sed 's/[^0-9]//g')
+                du_output=$(mc du "${target_path}/" 2>/dev/null | head -1)
+                total_size=$(echo "$du_output" | awk '{print $1, $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                object_count=$(echo "$du_output" | awk '{print $NF}' | sed 's/[^0-9]//g')
 
-            if [ "$csv_mode" = true ]; then
-                # CSV row: model,created_at,size (bytes),human_size,count_objects
-                model_path="${folder}/${name_clean}"
-
-                # Try to get raw bytes via mc du --json
-                bytes=$(mc du --json "${full_child}/" 2>/dev/null \
-                    | grep -o '"size":[0-9]*' | head -1 | cut -d: -f2)
-                bytes=${bytes:-0}
-
-                echo "${model_path},${created_at},${bytes},${total_size:-unknown},${object_count:-0}"
-            else
-                # Pretty terminal output
-                echo "   └── ${name_clean}/"
-                printf "       📅 Created/Modified: %s    📦 Total size: %s (%s objects)\n" \
-                       "$created_at" "${total_size:-unknown}" "${object_count:-?}"
+                if [ "$csv_mode" = true ]; then
+                    bytes=$(mc du --json "${target_path}/" 2>/dev/null \
+                        | grep -o '"size":[0-9]*' | head -1 | cut -d: -f2)
+                    bytes=${bytes:-0}
+                    echo "${logical_name},${provider},${model},${branch},${created_at},${bytes},${total_size:-unknown},${object_count:-0}"
+                else
+                    echo "   └── ${logical_name}/"
+                    printf "       📅 Created/Modified: %s    📦 Total size: %s (%s objects)\n" \
+                           "$created_at" "${total_size:-unknown}" "${object_count:-?}"
+                fi
             fi
         done
     fi
@@ -173,7 +219,7 @@ if [ "$csv_mode" = false ]; then
         echo "   • created_at = oldest file timestamp found *inside* the child folder (real creation/upload time)."
     fi
     echo "   • Total size comes from 'mc du' (recursive sum of all objects under the folder)."
-    echo "   • Only immediate children shown (e.g. 'main/' or other). Use --csv for spreadsheet-friendly output."
-    echo "   • CSV columns: model, created_at, size (bytes), human_size, count_objects"
-    echo "   • Add --fast for much quicker runs on large model folders."
+    echo "   • Structured output: name (provider/model:branch or model:branch), provider (or HuggingFace), model, branch."
+    echo "   • created_at = oldest file timestamp inside the branch/model folder."
+    echo "   • Use --csv for the full structured CSV. Add --fast to skip recursive timestamp scans."
 fi
