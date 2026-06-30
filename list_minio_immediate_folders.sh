@@ -14,18 +14,18 @@
 #
 # Assumes:
 #   - `mc` is installed and in PATH
-#   - The bucket/alias is already configured (here: bucket)
-#   - Starting path: bucket/folder/
+#   - The bucket/alias is already configured (here: modelhub_bucket)
+#   - Starting path: modelhub_bucket/modelhub/model/huggingface.co/
 #
 # Usage:
 #   ./list_minio_immediate_folders.sh
-#   ./list_minio_immediate_folders.sh bucket/some/other/prefix
+#   ./list_minio_immediate_folders.sh modelhub_bucket/some/other/prefix
 #   ./list_minio_immediate_folders.sh --fast
 #   ./list_minio_immediate_folders.sh --csv
-#   ./list_minio_immediate_folders.sh --fast --csv bucket/some/other/prefix > models.csv
+#   ./list_minio_immediate_folders.sh --fast --csv modelhub_bucket/some/other/prefix > models.csv
 #
 # If no argument is given, it defaults to:
-#   bucket/folder/
+#   modelhub_bucket/modelhub/model/huggingface.co/
 #
 # In --csv mode the output is pure CSV (no colors/messages) so you can redirect to a file.
 # --fast skips the recursive mc ls inside each child (much faster on large models).
@@ -59,8 +59,11 @@ done
 if [ -n "$path_arg" ]; then
     FULL_PATH="$path_arg"
 else
-    FULL_PATH="bucket/folder"
+    FULL_PATH="modelhub_bucket/modelhub/model/huggingface.co"
 fi
+
+# Local NAS base path for sync check (adjust if your mount point differs)
+LOCAL_BASE="/mnt/modelhub"
 
 if [ "$csv_mode" = false ]; then
     echo "🔍 Exploring immediate folder structure under: ${FULL_PATH}/"
@@ -77,7 +80,7 @@ top_folders=$(mc ls "${FULL_PATH}/" 2>/dev/null \
     | sort)
 
 if [ "$csv_mode" = true ]; then
-    echo "name,provider,model,branch,created_at,size,human_size,count_objects"
+    echo "name,provider,model,branch,created_at,size,human_size,count_objects,sync_nas"
 fi
 
 if [ -z "$top_folders" ]; then
@@ -143,15 +146,22 @@ while IFS= read -r folder; do
                 total_size=$(echo "$du_output" | awk '{print $1, $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                 object_count=$(echo "$du_output" | awk '{print $NF}' | sed 's/[^0-9]//g')
 
+                # Check local NAS sync
+                sync_nas="false"
+                local_dir="${LOCAL_BASE}/Modelhub-model-huggingface-${provider}/${model}/${branch}"
+                if [ -d "$local_dir" ]; then
+                    sync_nas="true"
+                fi
+
                 if [ "$csv_mode" = true ]; then
                     bytes=$(mc du --json "${target_path}/" 2>/dev/null \
                         | grep -o '"size":[0-9]*' | head -1 | cut -d: -f2)
                     bytes=${bytes:-0}
-                    echo "${logical_name},${provider},${model},${branch},${created_at},${bytes},${total_size:-unknown},${object_count:-0}"
+                    echo "${logical_name},${provider},${model},${branch},${created_at},${bytes},${total_size:-unknown},${object_count:-0},${sync_nas}"
                 else
                     echo "   └── ${logical_name}/"
-                    printf "       📅 Created/Modified: %s    📦 Total size: %s (%s objects)\n" \
-                           "$created_at" "${total_size:-unknown}" "${object_count:-?}"
+                    printf "       📅 Created/Modified: %s    📦 Total size: %s (%s objects) [sync_nas: %s]\n" \
+                           "$created_at" "${total_size:-unknown}" "${object_count:-?}" "$sync_nas"
                 fi
                 continue
             fi
@@ -191,15 +201,22 @@ while IFS= read -r folder; do
                     total_size=$(echo "$du_output" | awk '{print $1, $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                     object_count=$(echo "$du_output" | awk '{print $NF}' | sed 's/[^0-9]//g')
 
+                    # Check local NAS sync
+                    sync_nas="false"
+                    local_dir="${LOCAL_BASE}/Modelhub-model-huggingface-${provider}/${model}/${branch}"
+                    if [ -d "$local_dir" ]; then
+                        sync_nas="true"
+                    fi
+
                     if [ "$csv_mode" = true ]; then
                         bytes=$(mc du --json "${target_path}/" 2>/dev/null \
                             | grep -o '"size":[0-9]*' | head -1 | cut -d: -f2)
                         bytes=${bytes:-0}
-                        echo "${logical_name},${provider},${model},${branch},${created_at},${bytes},${total_size:-unknown},${object_count:-0}"
+                        echo "${logical_name},${provider},${model},${branch},${created_at},${bytes},${total_size:-unknown},${object_count:-0},${sync_nas}"
                     else
                         echo "   └── ${logical_name}/"
-                        printf "       📅 Created/Modified: %s    📦 Total size: %s (%s objects)\n" \
-                               "$created_at" "${total_size:-unknown}" "${object_count:-?}"
+                        printf "       📅 Created/Modified: %s    📦 Total size: %s (%s objects) [sync_nas: %s]\n" \
+                               "$created_at" "${total_size:-unknown}" "${object_count:-?}" "$sync_nas"
                     fi
                 done
             else
@@ -228,15 +245,22 @@ while IFS= read -r folder; do
                 total_size=$(echo "$du_output" | awk '{print $1, $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                 object_count=$(echo "$du_output" | awk '{print $NF}' | sed 's/[^0-9]//g')
 
+                # Check local NAS sync
+                sync_nas="false"
+                local_dir="${LOCAL_BASE}/Modelhub-model-huggingface-${provider}/${model}/${branch}"
+                if [ -d "$local_dir" ]; then
+                    sync_nas="true"
+                fi
+
                 if [ "$csv_mode" = true ]; then
                     bytes=$(mc du --json "${target_path}/" 2>/dev/null \
                         | grep -o '"size":[0-9]*' | head -1 | cut -d: -f2)
                     bytes=${bytes:-0}
-                    echo "${logical_name},${provider},${model},${branch},${created_at},${bytes},${total_size:-unknown},${object_count:-0}"
+                    echo "${logical_name},${provider},${model},${branch},${created_at},${bytes},${total_size:-unknown},${object_count:-0},${sync_nas}"
                 else
                     echo "   └── ${logical_name}/"
-                    printf "       📅 Created/Modified: %s    📦 Total size: %s (%s objects)\n" \
-                           "$created_at" "${total_size:-unknown}" "${object_count:-?}"
+                    printf "       📅 Created/Modified: %s    📦 Total size: %s (%s objects) [sync_nas: %s]\n" \
+                           "$created_at" "${total_size:-unknown}" "${object_count:-?}" "$sync_nas"
                 fi
             fi
         done
@@ -257,5 +281,6 @@ if [ "$csv_mode" = false ]; then
     echo "   • Total size comes from 'mc du' (recursive sum of all objects under the folder)."
     echo "   • Structured output: name (provider/model:branch or model:branch), provider (or HuggingFace), model, branch."
     echo "   • created_at = oldest file timestamp inside the branch/model folder."
+    echo "   • sync_nas = true if the folder exists locally at ${LOCAL_BASE}/Modelhub-model-huggingface-{provider}/{model}/{branch}"
     echo "   • Use --csv for the full structured CSV. Add --fast to skip recursive timestamp scans."
 fi
